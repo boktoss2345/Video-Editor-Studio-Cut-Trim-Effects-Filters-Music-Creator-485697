@@ -2888,11 +2888,19 @@ async function startExport(){
     const ext = mime.indexOf('mp4') >= 0 ? 'mp4' : 'webm';
     $('#expBar').style.width = '100%';
     $('#expStatus').textContent = 'Export finished in ' + elapsed + 's · ' + (blob.size/1048576).toFixed(2) + ' MB';
+    const filename = 'export.' + ext;
+    window.__lastExportBlob = blob;
+    window.__lastExportUrl = url;
+    window.__lastExportFilename = filename;
+    window.__lastExportMime = blob.type || mime.split(';')[0];
+
     $('#expResult').innerHTML =
       '<div class="group" style="margin-top:10px">' +
-      '<a class="btn primary" style="width:100%;text-decoration:none" download="export.' + ext + '" href="' + url + '">⬇ Download Video</a>' +
-      '<video src="' + url + '" controls style="width:100%;margin-top:8px;border-radius:8px;background:#000"></video>' +
+      '<button class="btn primary" id="expDownload" style="width:100%">⬇ Download Video</button>' +
+      '<video src="' + url + '" controls playsinline style="width:100%;margin-top:8px;border-radius:8px;background:#000"></video>' +
       '</div>';
+
+    $('#expDownload').addEventListener('click', () => downloadExportBlob(blob, filename));
     finishExport(false);
   };
 
@@ -2985,6 +2993,73 @@ async function startExport(){
     try { rec.stop(); } catch(e){}
     finishExport(true);
   };
+}
+
+
+/* Android/WebView-safe export download.
+   Best path: native wrapper exposes Android.downloadBase64(base64, mime, filename)
+   and writes the decoded bytes to MediaStore/Downloads.
+   Browser fallback uses a normal Blob download. */
+async function downloadExportBlob(blob, filename){
+  if (!blob || !blob.size){
+    toast('No exported video available');
+    return;
+  }
+
+  const mime = blob.type || 'video/webm';
+
+  // Native Android WebView bridge (reliable on Android when implemented by wrapper).
+  try {
+    if (window.Android && typeof window.Android.downloadBase64 === 'function'){
+      $('#expStatus').textContent = 'Preparing download…';
+      const dataUrl = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ''));
+        reader.onerror = () => reject(reader.error || new Error('FileReader failed'));
+        reader.readAsDataURL(blob);
+      });
+      const base64 = dataUrl.substring(dataUrl.indexOf(',') + 1);
+      window.Android.downloadBase64(base64, mime, filename);
+      $('#expStatus').textContent = 'Video sent to Android Downloads.';
+      toast('Saving video to Downloads…');
+      return;
+    }
+  } catch(e){
+    console.warn('Android bridge download failed', e);
+  }
+
+  // Modern browser / Chrome fallback.
+  try {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+    $('#expStatus').textContent = 'Download started.';
+    toast('Download started');
+    return;
+  } catch(e){
+    console.warn('Blob download failed', e);
+  }
+
+  // Last fallback: share/save sheet when supported.
+  try {
+    const file = new File([blob], filename, {type:mime});
+    if (navigator.canShare && navigator.canShare({files:[file]}) && navigator.share){
+      await navigator.share({files:[file], title:'Exported video'});
+      $('#expStatus').textContent = 'Video ready to save/share.';
+      return;
+    }
+  } catch(e){
+    console.warn('Share fallback failed', e);
+  }
+
+  $('#expStatus').textContent = 'Android WebView needs the native download bridge to save this file.';
+  toast('Download is not supported by this WebView');
 }
 
 function blitToPreview(srcCanvas){
